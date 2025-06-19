@@ -1,0 +1,148 @@
+﻿@page "/"
+@using System.Text
+@using System.Text.Json
+@using System.Net.Http.Headers
+@using System.Net.Http.Json
+@inject IHttpClientFactory HttpClientFactory
+@inject NavigationManager NavigationManager
+
+<h3>FAC Checkout Demo</h3>
+
+@if (!string.IsNullOrEmpty(PaymentHtml))
+{
+    <div>@((MarkupString)PaymentHtml)</div>
+}
+else if (!string.IsNullOrEmpty(ResultMessage))
+{
+    <div class="alert alert-info">@ResultMessage</div>
+}
+else
+{
+    <button class="btn btn-primary" @onclick="StartPayment">Start Payment</button>
+}
+
+@code {
+    private string PaymentHtml;
+    private string ResultMessage;
+
+    // Replace these with your actual credentials from FAC/PowerTranz
+    private const string MerchantId = "88805131";
+    private const string ApiPassword = "jTMeNEjzHt1XafF1J2tdXMXQzKSAWggqUqdHGAxGRTCWNn8X4UNSk4";
+
+    [Parameter]
+    [SupplyParameterFromQuery(Name = "SpiToken")]
+    public string SpiTokenFromQuery { get; set; }
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (!string.IsNullOrWhiteSpace(SpiTokenFromQuery))
+        {
+            await CompletePayment(SpiTokenFromQuery);
+        }
+    }
+
+    private async Task StartPayment()
+    {
+        var client = HttpClientFactory.CreateClient();
+        client.BaseAddress = new Uri("https://staging.ptranz.com/api/spi/");
+
+        // Add Basic Authentication header
+        var credentials = Encoding.ASCII.GetBytes($"{MerchantId}:{ApiPassword}");
+        client.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Basic", Convert.ToBase64String(credentials));
+
+        var saleRequest = new
+        {
+            TransactionIdentifier = Guid.NewGuid().ToString(),
+            TotalAmount = "000000005000", // 12-digit string for $50.00
+            CurrencyCode = "840",
+            ThreeDSecure = true,
+            OrderIdentifier = "ORDER-" + Guid.NewGuid().ToString("N").Substring(0, 8),
+            BillingAddress = new
+            {
+                FirstName = "John",
+                LastName = "Doe",
+                Line1 = "123 Main Street",
+                City = "Nassau",
+                State = "NP",
+                PostalCode = "00000",
+                CountryCode = "840",
+                EmailAddress = "john@example.com",
+                PhoneNumber = "2425551234"
+            },
+            ExtendedData = new
+            {
+                MerchantResponseUrl = NavigationManager.BaseUri.TrimEnd('/') + "/powertranz-test",
+                HostedPage = new
+                {
+                    PageSet = "MapayPageSet",   // Replace with your actual PageSet
+                    PageName = "MapayPageName"  // Replace with your actual PageName
+                }
+            }
+        };
+
+        try
+        {
+            var json = JsonSerializer.Serialize(saleRequest);
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            var response = await client.PostAsync("Auth", content);
+            var responseContent = await response.Content.ReadAsStringAsync();
+
+            if (response.IsSuccessStatusCode)
+            {
+                var doc = JsonDocument.Parse(responseContent);
+
+                if (doc.RootElement.TryGetProperty("RedirectData", out var redirectHtml))
+                {
+                    PaymentHtml = redirectHtml.GetString();
+                }
+                else
+                {
+                    ResultMessage = "FAC did not return RedirectData. Full response:\n" + responseContent;
+                }
+            }
+            else
+            {
+                ResultMessage = $"Sale failed: HTTP {(int)response.StatusCode} - {response.ReasonPhrase}\nResponse:\n{responseContent}";
+            }
+        }
+        catch (Exception ex)
+        {
+            ResultMessage = "Error during payment start: " + ex.Message;
+        }
+    }
+
+    private async Task CompletePayment(string spiToken)
+    {
+        var client = HttpClientFactory.CreateClient();
+        client.BaseAddress = new Uri("https://staging.ptranz.com/api/spi/");
+
+        var credentials = Encoding.ASCII.GetBytes($"{MerchantId}:{ApiPassword}");
+        client.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Basic", Convert.ToBase64String(credentials));
+
+        var content = new StringContent($"\"{spiToken}\"", Encoding.UTF8, "application/json");
+
+        try
+        {
+            var response = await client.PostAsync("Payment", content);
+            var responseContent = await response.Content.ReadAsStringAsync();
+
+            if (response.IsSuccessStatusCode)
+            {
+                var json = JsonDocument.Parse(responseContent);
+                var outcome = json.RootElement.GetProperty("ResponseCode").GetString();
+                ResultMessage = $"Payment completed. FAC Response Code: {outcome}";
+            }
+            else
+            {
+                ResultMessage = $"Payment failed: HTTP {(int)response.StatusCode} - {response.ReasonPhrase}\n{responseContent}";
+            }
+        }
+        catch (Exception ex)
+        {
+            ResultMessage = $"Error completing payment: {ex.Message}";
+        }
+    }
+}
